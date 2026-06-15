@@ -1,0 +1,161 @@
+import streamlit as st
+import pandas as pd
+import sqlite3
+from datetime import datetime
+
+# Database Setup
+conn = sqlite3.connect('morning_bakers.db', check_same_thread=False)
+c = conn.cursor()
+
+# Tables Creation
+c.execute('''CREATE TABLE IF NOT EXISTS customers 
+             (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, pav_type TEXT, rate REAL)''')
+
+c.execute('''CREATE TABLE IF NOT EXISTS daily_records 
+             (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, customer_id INTEGER, 
+              qty INTEGER, total_amount REAL, status TEXT, FOREIGN KEY(customer_id) REFERENCES customers(id))''')
+
+c.execute('''CREATE TABLE IF NOT EXISTS payments 
+             (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, customer_id INTEGER, 
+              amount_paid REAL, FOREIGN KEY(customer_id) REFERENCES customers(id))''')
+conn.commit()
+
+st.set_page_config(page_title="Morning Baker's Dashboard", layout="wide")
+st.title("🍞 Morning Baker's - Daily Delivery & Udhar Khata")
+
+menu = ["Daily Entry", "Customer Management", "Udhar Report & History", "Receive Payment"]
+choice = st.sidebar.selectbox("Menu", menu)
+
+# --- 1. CUSTOMER MANAGEMENT ---
+if choice == "Customer Management":
+    st.header("👤 Manage Customers (ग्राहक प्रबंधन)")
+    
+    with st.form("Add Customer"):
+        name = st.text_input("Customer Name (ग्राहक का नाम)")
+        pav_type = st.text_input("Pav Type (पाव का प्रकार - e.g., Ladi Pav)")
+        rate = st.number_input("Rate per Pav (एक पाव की कीमत)", min_value=0.0, value=20.0, step=0.5)
+        submit = st.form_submit_button("Save Customer")
+        
+        if submit and name:
+            c.execute("INSERT INTO customers (name, pav_type, rate) VALUES (?, ?, ?)", (name, pav_type, rate))
+            conn.commit()
+            st.success(f"✔️ {name} को सफलतापूर्वक जोड़ दिया गया है!")
+
+    st.subheader("All Active Customers")
+    df_cust = pd.read_sql_query("SELECT id as 'ID', name as 'Name', pav_type as 'Pav Type', rate as 'Rate (₹)' FROM customers", conn)
+    st.dataframe(df_cust, use_container_width=True, hide_index=True)
+
+# --- 2. DAILY ENTRY ---
+elif choice == "Daily Entry":
+    st.header("📅 Daily Pav Entry (रोज़ का हिसाब)")
+    date_today = st.date_input("Select Date", datetime.today()).strftime('%Y-%m-%d')
+    
+    customers = c.execute("SELECT id, name, pav_type, rate FROM customers").fetchall()
+    
+    if not customers:
+        st.warning("⚠️ कृपया पहले 'Customer Management' में जाकर कस्टमर जोड़ें।")
+    else:
+        st.info("💡 सभी ग्राहकों की एंट्री करें और नीचे 'Submit Today's Records' बटन दबाएं।")
+        
+        with st.form("daily_form"):
+            entries = []
+            for cust in customers:
+                c_id, c_name, c_pav, c_rate = cust
+                col1, col2, col3, col4 = st.columns()
+                with col1:
+                    st.write(f"**{c_name}** ({c_pav} - ₹{c_rate})")
+                with col2:
+                    qty = st.number_input(f"Qty", min_value=0, value=0, key=f"qty_{c_id}_{date_today}")
+                with col3:
+                    total_p = qty * c_rate
+                    st.write(f"Total: ₹{total_p}")
+                with col4:
+                    status = st.selectbox(f"Payment", ["Udhar", "Cash"], key=f"status_{c_id}_{date_today}")
+                
+                if qty > 0:
+                    entries.append((date_today, c_id, qty, total_p, status))
+                st.write("---")
+                
+            submit_daily = st.form_submit_button("💾 Submit Today's Records")
+            
+            if submit_daily:
+                if entries:
+                    for entry in entries:
+                        c.execute("INSERT INTO daily_records (date, customer_id, qty, total_amount, status) VALUES (?, ?, ?, ?, ?)", entry)
+                    conn.commit()
+                    st.success("🎉 आज का सारा हिसाब सुरक्षित (Save) कर लिया गया है!")
+                else:
+                    st.warning("आपने किसी भी ग्राहक की मात्रा (Qty) नहीं डाली है।")
+
+# --- 3. RECEIVE PAYMENT ---
+elif choice == "Receive Payment":
+    st.header("💰 Receive Udhar Payment (उधारी के पैसे जमा करें)")
+    date_pay = st.date_input("Payment Date", datetime.today()).strftime('%Y-%m-%d')
+    
+    customers = c.execute("SELECT id, name FROM customers").fetchall()
+    
+    if not customers:
+        st.warning("कोई ग्राहक उपलब्ध नहीं है।")
+    else:
+        cust_names = [cust[1] for cust in customers]
+        selected_cust_name = st.selectbox("Select Customer", cust_names)
+        
+        selected_cust_id = next(cust[0] for cust in customers if cust[1] == selected_cust_name)
+        
+        amount_paid = st.number_input("Amount Received (कितने पैसे मिले?)", min_value=0.0, step=10.0)
+        
+        if st.button("💵 Record Payment"):
+            if amount_paid > 0:
+                c.execute("INSERT INTO payments (date, customer_id, amount_paid) VALUES (?, ?, ?)", 
+                          (date_pay, selected_cust_id, amount_paid))
+                conn.commit()
+                st.success(f"💸 {selected_cust_name} के ₹{amount_paid} जमा कर लिए गए हैं!")
+            else:
+                st.error("कृपया 0 से ज़्यादा की राशि डालें।")
+
+# --- 4. UDHAR REPORT & HISTORY ---
+elif choice == "Udhar Report & History":
+    st.header("📊 Reports & Pending Udhar (बकाया और इतिहास)")
+    
+    query_balance = """
+        SELECT 
+            c.name as 'Customer Name',
+            c.pav_type as 'Pav Type',
+            COALESCE(dr.total_bill, 0) as 'Total Bill (₹)',
+            COALESCE(p.total_paid, 0) as 'Total Paid (₹)',
+            (COALESCE(dr.total_bill, 0) - COALESCE(p.total_paid, 0)) as 'Net Udhar (₹)'
+        FROM customers c
+        LEFT JOIN (
+            SELECT customer_id, SUM(total_amount) as total_bill 
+            FROM daily_records WHERE status = 'Udhar' GROUP BY customer_id
+        ) dr ON c.id = dr.customer_id
+        LEFT JOIN (
+            SELECT customer_id, SUM(amount_paid) as total_paid 
+            FROM payments GROUP BY customer_id
+        ) p ON c.id = p.customer_id
+        WHERE (COALESCE(dr.total_bill, 0) - COALESCE(p.total_paid, 0)) > 0
+    """
+    df_balance = pd.read_sql_query(query_balance, conn)
+    
+    total_udhar_market = df_balance['Net Udhar (₹)'].sum() if not df_balance.empty else 0.0
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric(label="🔴 बाजार में कुल उधारी (Total Outstanding)", value=f"₹{total_udhar_market}")
+        
+    st.subheader("📋 Current Udhar List (किससे कितना पैसा लेना बाकी है)")
+    if not df_balance.empty:
+        st.dataframe(df_balance, use_container_width=True, hide_index=True)
+    else:
+        st.success("🎈 बधाई हो! बाजार में कोई उधारी बाकी नहीं है।")
+        
+    st.subheader("📜 Full Delivery History (पिछला सारा रिकॉर्ड)")
+    query_history = """
+        SELECT r.date as 'Date', c.name as 'Customer Name', c.pav_type as 'Pav Type', 
+               r.qty as 'Quantity', r.total_amount as 'Amount (₹)', r.status as 'Payment Status'
+        FROM daily_records r
+        JOIN customers c ON r.customer_id = c.id
+        ORDER BY r.date DESC
+    """
+    df_hist = pd.read_sql_query(query_history, conn)
+    st.dataframe(df_hist, use_container_width=True, hide_index=True)
